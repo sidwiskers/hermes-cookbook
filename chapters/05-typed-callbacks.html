@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>5. Typed callbacks — The Hermes Cookbook</title>
+<link rel="icon" href="../assets/img/logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/book.css">
+</head>
+<body>
+
+<header class="topbar">
+  <button id="menuToggle" class="gh" type="button">Chapters</button>
+  <a class="wordmark" href="../index.html"><img class="wordmark-logo" src="../assets/img/logo.svg" alt="">The <em>Hermes</em> Cookbook</a>
+  <span class="crumb">Chapter 5 · Typed callbacks</span>
+  <input id="q" type="search" placeholder="Filter chapters…" aria-label="Filter chapters">
+  <button id="theme" type="button">Dark</button>
+  <a class="gh" href="https://github.com/sidwiskers/hermes">Hermes on GitHub</a>
+</header>
+
+<div class="shell">
+  <nav class="toc"><p class="toc-head">Contents</p><ol></ol></nav>
+  <main>
+    <article>
+      <p class="kicker">Chapter 5</p>
+      <h1>Typed callbacks</h1>
+      <p class="lede">
+        Callback data is a string, but your intent isn't. Hermes's
+        <code>CallbackCodec</code> turns "parse the string, hope for the
+        best" into "decode a typed value, or reject the tap cleanly".
+      </p>
+
+      <h2>The problem with raw strings</h2>
+      <p>
+        Every callback handler in every bot framework starts the same way:
+      </p>
+
+      <pre><code>// The old way. We've all written it.
+parts := strings.Split(c.Data(), ":")
+if len(parts) != 3 || parts[0] != "order" {
+    return c.Answer("Hmm, that button is stale.")
+}
+id, err := strconv.ParseInt(parts[1], 10, 64)
+if err != nil { /* … */ }
+action := parts[2] // "approve"? "refund"? "apprve"? who knows</code></pre>
+
+      <p>
+        It works until someone renames a prefix in one place and not the
+        other, or a user replays a year-old button from a cached client.
+        Typed callbacks move all of that into one codec defined once, next
+        to the button that produces the data.
+      </p>
+
+      <h2>Codecs for the common shapes</h2>
+      <pre><code>var userPick = hermes.StringCallback("user:")   // payload is a raw string
+var pageNav  = hermes.IntCallback("page:")        // payload is an int
+var orderAct = hermes.Int64Callback("order:")     // payload is an int64</code></pre>
+
+      <p>
+        A codec does both directions. Building the button encodes;
+        handling the tap decodes:
+      </p>
+
+      <pre><code>// Building the keyboard:
+keyboard := hermes.Keyboard(
+    hermes.Row(
+        pageNav.MustButton("← Prev", page-1),
+        pageNav.MustButton("Next →", page+1),
+    ),
+)
+
+// Handling the tap:
+bot.CallbackPrefix("page:", pageNav.Handler(func(c *hermes.Context, page int) error {
+    return c.Edit(renderPage(page))   // page is already an int
+}))</code></pre>
+
+      <p>
+        <code>MustButton</code> panics if the encoded value would exceed
+        Telegram's 64-byte limit — which is what you want for static
+        configuration, because it fails at startup, loudly, instead of at
+        2&nbsp;a.m. in production. For user-influenced values use
+        <code>Button</code> and handle the error yourself.
+      </p>
+
+      <h2>Structured payloads with JSON</h2>
+      <p>
+        When two or three fields travel together, there's
+        <code>JSONCallback</code>:
+      </p>
+
+      <pre><code>type moderation struct {
+    PostID int64  `json:"p"`
+    Action string `json:"a"` // "approve" | "reject"
+}
+
+var mod = hermes.JSONCallback[moderation]("mod:")
+
+// produce:
+btn, err := mod.Button("Approve", moderation{PostID: 42, Action: "approve"})
+
+// consume:
+bot.CallbackPrefix("mod:", mod.Handler(func(c *hermes.Context, m moderation) error {
+    if m.Action != "approve" && m.Action != "reject" {
+        return c.Answer("Unknown action.")
+    }
+    return applyModeration(c, m)
+}))</code></pre>
+
+      <p>
+        Short JSON tags are not paranoia — they are how a two-field struct
+        stays inside 64 bytes. If a payload starts growing, that's the
+        framework nudging you toward storing state server-side and shipping
+        only an id, which was the right design anyway.
+      </p>
+
+      <h2>When the codec rejects</h2>
+      <p>
+        <code>Parse</code> (and therefore <code>Handler</code>) rejects two
+        things: wrong prefix, and malformed payload. Both happen in the wild:
+        stale messages, replayed taps, clients with cached keyboards from
+        three releases ago. The handler path surfaces the decode failure as
+        an ordinary error through your error handler; the tap gets no
+        answer unless you send one. If you want the user told, wrap it:
+      </p>
+
+      <pre><code>bot.CallbackPrefix("mod:", func(c *hermes.Context) error {
+    m, err := mod.Parse(c.Data())
+    if err != nil {
+        return c.Answer("That button is from an older version.")
+    }
+    return applyModeration(c, m)
+})</code></pre>
+
+      <p>
+        That one toast, "that button is from an older version", will save
+        you more confused bug reports than any other line in this chapter.
+      </p>
+
+      <h2>Prefix discipline</h2>
+      <p>
+        A few rules that keep a growing bot sane:
+      </p>
+      <ul>
+        <li>One codec owns one prefix, and the prefix ends in a separator:
+        <code>"user:"</code>, not <code>"user"</code>. Otherwise
+        <code>"user:42"</code> and <code>"username:bob"</code> collide in
+        ways you will debug at midnight.</li>
+        <li>Define codecs at package scope, next to the handlers that use
+        them. The codec <em>is</em> the protocol documentation.</li>
+        <li>Never put secrets in callback data. It's visible to the client,
+        logged by proxies, and replayable by construction. Ids and intent,
+        nothing else.</li>
+      </ul>
+
+      <nav class="pager"></nav>
+      <div class="colophon">The Hermes Cookbook · Chapter 5 of 13 · MIT</div>
+    </article>
+  </main>
+</div>
+
+<script src="../assets/js/book.js"></script>
+</body>
+</html>

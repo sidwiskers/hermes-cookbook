@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>10. Ephemeral messages — The Hermes Cookbook</title>
+<link rel="icon" href="../assets/img/logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/book.css">
+</head>
+<body>
+
+<header class="topbar">
+  <button id="menuToggle" class="gh" type="button">Chapters</button>
+  <a class="wordmark" href="../index.html"><img class="wordmark-logo" src="../assets/img/logo.svg" alt="">The <em>Hermes</em> Cookbook</a>
+  <span class="crumb">Chapter 10 · Ephemeral messages</span>
+  <input id="q" type="search" placeholder="Filter chapters…" aria-label="Filter chapters">
+  <button id="theme" type="button">Dark</button>
+  <a class="gh" href="https://github.com/sidwiskers/hermes">Hermes on GitHub</a>
+</header>
+
+<div class="shell">
+  <nav class="toc"><p class="toc-head">Contents</p><ol></ol></nav>
+  <main>
+    <article>
+      <p class="kicker">Chapter 10</p>
+      <h1>Ephemeral messages</h1>
+      <p class="lede">
+        Some answers belong to one user: their balance, their settings, the
+        result of a button they pressed in a busy group. Ephemeral messages
+        deliver exactly that, and Hermes makes them as easy as a normal send.
+      </p>
+
+      <h2>One word different</h2>
+      <pre><code>bot.Command("balance", func(c *hermes.Context) error {
+    bal := lookupBalance(c)
+    return c.Ephemeral(fmt.Sprintf("Your balance: %d credits", bal))
+})</code></pre>
+
+      <p>
+        <code>c.Ephemeral</code> targets the current sender automatically.
+        In a private chat that is the user who messaged the bot; for a
+        callback query it is whoever tapped the button; for an ordinary group
+        message it is that message's sender. Replying to someone else's
+        message does not retarget the ephemeral response. You do not compute
+        a receiver id yourself — the context already knows who caused the
+        update.
+      </p>
+
+      <p>
+        The full family mirrors the ordinary send surface:
+      </p>
+      <ul>
+        <li><code>c.Ephemeral(text)</code> / <code>c.EphemeralMessage(text)</code></li>
+        <li><code>c.EphemeralPhoto</code>, <code>c.EphemeralDocument</code>,
+        <code>c.EphemeralVideo</code>, <code>c.EphemeralAudio</code>,
+        <code>c.EphemeralVoice</code>, <code>c.EphemeralSticker</code>,
+        <code>c.EphemeralAnimation</code></li>
+      </ul>
+
+      <pre><code>bot.Command("statement", func(c *hermes.Context) error {
+    pdf := buildStatementPDF(c)
+    return c.EphemeralDocument(pdf, "Your statement — only you can see this.")
+})</code></pre>
+
+      <h2>Group ergonomics, the killer use case</h2>
+      <p>
+        The pattern ephemeral messaging was made for: a group bot that
+        answers a personal question without polluting the group.
+      </p>
+
+      <pre><code>bot.CallbackPrefix("settings:", func(c *hermes.Context) error {
+    return c.Ephemeral(
+        "&lt;b&gt;Your settings&lt;/b&gt;\nNotifications: on\nLanguage: en",
+        hermes.HTML,
+        hermes.WithKeyboard(hermes.Keyboard(
+            hermes.Row(hermes.Button("Toggle notifications", "settings:notif")),
+        )),
+    )
+})</code></pre>
+
+      <p>
+        The user who tapped sees a private panel; the other forty people in
+        the group see nothing. Before ephemeral sends, bots did this by
+        opening a DM the user might never notice, or worse, posting
+        semi-private data into the group and deleting it quickly. Both were
+        bad. This is clean.
+      </p>
+
+      <h2>The edit lifecycle is complete</h2>
+      <p>
+        Ephemeral messages are not fire-and-forget. Bot API 10.3 brought the
+        full lifecycle, and Hermes exposes typed methods for editing text,
+        media, captions, and keyboards of ephemeral messages, plus deletion,
+        with streamed uploads for media edits. In practice that means a
+        settings panel like the one above can be a <em>living</em> panel:
+        tap, edit in place, tap again.
+      </p>
+
+      <pre><code>// After toggling, update the panel the user is looking at.
+_, err := c.Bot.EditEphemeralMessageText(c.Context,
+    hermes.EditEphemeralMessageTextParams{
+        // receiver + message reference come from the update you handled
+        Text: "&lt;b&gt;Your settings&lt;/b&gt;\nNotifications: off\nLanguage: en",
+        // …
+    })</code></pre>
+
+      <p>
+        Filtering for ephemeral messages is one call —
+        <code>hermes.EphemeralMessage</code> — so handlers that should only
+        ever see ephemeral traffic (or never see it) are one filter away.
+      </p>
+
+      <div class="warn">
+        <span class="tag">Ephemeral ≠ secure</span>
+        <p>Ephemeral messages are a <em>privacy convenience</em>, not an
+        encryption boundary. The content still flows through Telegram and
+        your bot. Never put credentials, recovery codes, or anything you'd
+        regret in a screenshot into one. "Only you can see this" refers to
+        the chat UI, not to the threat model.</p>
+      </div>
+
+      <h2>When not to use them</h2>
+      <p>
+        If the answer is useful to the whole group — game scores, poll
+        results, moderation confirmations — send normally. Ephemeral answers
+        in a group are invisible to admins and to your own audit log unless
+        you log them yourself. Reach for ephemeral when the content is
+        personal; reach for a normal send when it's communal. The bots that
+        feel right are the ones that never mix the two up.
+      </p>
+
+      <nav class="pager"></nav>
+      <div class="colophon">The Hermes Cookbook · Chapter 10 of 13 · MIT</div>
+    </article>
+  </main>
+</div>
+
+<script src="../assets/js/book.js"></script>
+</body>
+</html>

@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>12. Testing with Hermes Lab — The Hermes Cookbook</title>
+<link rel="icon" href="../assets/img/logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/book.css">
+</head>
+<body>
+
+<header class="topbar">
+  <button id="menuToggle" class="gh" type="button">Chapters</button>
+  <a class="wordmark" href="../index.html"><img class="wordmark-logo" src="../assets/img/logo.svg" alt="">The <em>Hermes</em> Cookbook</a>
+  <span class="crumb">Chapter 12 · Testing with Hermes Lab</span>
+  <input id="q" type="search" placeholder="Filter chapters…" aria-label="Filter chapters">
+  <button id="theme" type="button">Dark</button>
+  <a class="gh" href="https://github.com/sidwiskers/hermes">Hermes on GitHub</a>
+</header>
+
+<div class="shell">
+  <nav class="toc"><p class="toc-head">Contents</p><ol></ol></nav>
+  <main>
+    <article>
+      <p class="kicker">Chapter 12</p>
+      <h1>Testing with Hermes Lab</h1>
+      <p class="lede">
+        Testing a bot against the real Telegram means a real token, a real
+        chat, and a real mess. Hermes Lab is a deterministic in-process
+        Telegram: virtual users, a virtual Bot API, and expectations you can
+        assert on. Tests run in milliseconds and fail with readable diffs.
+      </p>
+
+      <h2>Your first lab test</h2>
+      <p>
+        A lab owns a fully-wired bot. You register routes on it exactly as in
+        production, then deliver updates through virtual users:
+      </p>
+
+      <pre><span class="file-tab">bot_test.go</span><code>func TestStartCommand(t *testing.T) {
+    lab := testkit.NewLab(t)
+    registerRoutes(lab.Bot) // the same function main() calls
+
+    alice := lab.PrivateUser(1001, "alice")
+
+    alice.Command("start").
+        Want(testkit.Sent("Welcome, alice."))
+}</code></pre>
+
+      <p>
+        Read the test top to bottom: it says what it does, in the order it
+        does it. No mocks of HTTP, no canned JSON files, no network. The
+        update went through the real bot, router, and middleware; the Lab
+        deliberately drives <code>Bot.Handle</code> synchronously instead of
+        the production polling/webhook dispatcher. Only the wire is virtual.
+      </p>
+
+      <h2>Actors and chats</h2>
+      <pre><code>alice := lab.PrivateUser(1001, "alice")       // DMs
+bob := lab.GroupUser(-400123, 2002, "bob")    // speaks inside a supergroup
+
+alice.Command("profile")
+bob.Text("is the bot here?")
+bob.Callback("menu:open") // presses a button on the bot's latest message</code></pre>
+
+      <p>
+        Each actor carries a stable user and chat identity, so session-keyed
+        tests (chapter 7) behave exactly as in production: two users in one
+        group get independent sessions, one user in two chats does too.
+        <code>CallbackOn</code> targets a specific earlier message when the
+        "latest" default isn't the one you want.
+      </p>
+
+      <h2>Expectations</h2>
+      <p>
+        Assertions read like the behaviour they check:
+      </p>
+
+      <pre><code>step.Want(testkit.Called("sendMessage"))
+step.Want(testkit.Sent("order confirmed"))
+step.Want(testkit.Edited("order confirmed ✅"))
+step.Want(testkit.Answered("Saved."))
+step.Want(testkit.Acknowledged()) // answered with no toast
+step.Want(testkit.Deleted())
+step.Want(testkit.NoCalls())      // handler stayed silent
+step.Want(testkit.Matching("sendMessage",
+    func(r testkit.Request) bool {
+        return r.JSON["disable_notification"] == true
+    }))</code></pre>
+
+      <p>
+        Every <code>Want</code> returns the step, so assertions chain — and for
+        error paths there are <code>WantError</code> and
+        <code>WantAPIError(code)</code>. When an expectation fails, the
+        message tells you what the bot
+        <em>actually</em> did — the observed method list — instead of a bare
+        "expectation failed". Failed bot tests should read like bug reports,
+        and these do.
+      </p>
+
+      <h2>Failure is a feature</h2>
+      <p>
+        The lab's best trick is planned failure. Your bot will eventually
+        face rate limits, Telegram-side errors, and dropped connections;
+        better to meet them in CI:
+      </p>
+
+      <pre><code>lab.API.RateLimitNext("sendMessage", 3*time.Second)
+step := alice.Command("digest")
+// assert the handler degraded gracefully instead of dying
+
+lab.API.FailNext("sendMessage", 400, "message text is empty", nil)
+lab.API.TransportErrorNext("sendMessage", errors.New("connection reset"))
+lab.API.RespondNext("getMe", customBotUser) // exact response override</code></pre>
+
+      <p>
+        Each <code>Next</code> affects exactly one upcoming call of that
+        method. The lab stays deterministic by construction, never by
+        timing.
+      </p>
+
+      <h2>Replay: deduplication's test harness</h2>
+      <p>
+        Duplicate delivery can happen (chapter 11). The lab makes replaying
+        the exact same update a one-liner:
+      </p>
+
+      <pre><code>first := alice.Command("pay").Want(testkit.Called("sendInvoice"))
+first.Replay().Want(testkit.NoCalls()) // same update id: dedupe swallows it</code></pre>
+
+      <p>
+        If that second expectation ever fails, your dedupe middleware has a
+        hole, found in a unit test instead of a payment dispute.
+      </p>
+
+      <h2>FSM flows, end to end</h2>
+      <pre><code>alice.Command("signup")
+alice.Text("Ada").Want(testkit.Sent("Nice to meet you, Ada"))
+alice.Text("London").Want(testkit.Sent("All done, Ada from London."))</code></pre>
+
+      <p>
+        Conversations are just sequences of actor calls. This is where the
+        lab pays for itself most: state machines have more paths than any
+        human will click through, and each path is three lines of test.
+      </p>
+
+      <h2>House rules</h2>
+      <ul>
+        <li><strong>Register routes through the same function production
+        uses.</strong> If the test wires its own routes, it tests a bot that
+        doesn't exist.</li>
+        <li><strong>Call <code>lab.Reset()</code> between scenarios</strong>
+        sharing one lab, or make a lab per test. Reset clears retained
+        messages, queued failures, and the request log.</li>
+        <li><strong>Assert the user-visible surface</strong> — what was sent,
+        edited, answered — before asserting which methods were called. Text
+        first, plumbing second.</li>
+        <li><strong>Keep the lab out of production builds</strong> by simply
+        not importing <code>testkit</code> outside <code>_test.go</code>.
+        That is the whole isolation mechanism, and it's enough.</li>
+      </ul>
+
+      <nav class="pager"></nav>
+      <div class="colophon">The Hermes Cookbook · Chapter 12 of 13 · MIT</div>
+    </article>
+  </main>
+</div>
+
+<script src="../assets/js/book.js"></script>
+</body>
+</html>

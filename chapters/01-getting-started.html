@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>1. Getting started — The Hermes Cookbook</title>
+<link rel="icon" href="../assets/img/logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/book.css">
+</head>
+<body>
+
+<header class="topbar">
+  <button id="menuToggle" class="gh" type="button">Chapters</button>
+  <a class="wordmark" href="../index.html"><img class="wordmark-logo" src="../assets/img/logo.svg" alt="">The <em>Hermes</em> Cookbook</a>
+  <span class="crumb">Chapter 1 · Getting started</span>
+  <input id="q" type="search" placeholder="Filter chapters…" aria-label="Filter chapters">
+  <button id="theme" type="button">Dark</button>
+  <a class="gh" href="https://github.com/sidwiskers/hermes">Hermes on GitHub</a>
+</header>
+
+<div class="shell">
+  <nav class="toc"><p class="toc-head">Contents</p><ol></ol></nav>
+  <main>
+    <article>
+      <p class="kicker">Chapter 1</p>
+      <h1>Getting started</h1>
+      <p class="lede">
+        By the end of this chapter you will have a bot that answers
+        <code>/start</code>, runs on long polling, and shuts down cleanly when
+        you press Ctrl-C.
+      </p>
+
+      <h2>Prerequisites</h2>
+      <p>
+        You need Go 1.25 or later. That is the language floor Hermes commits
+        to, and the CI matrix tests against it explicitly. You also need a bot
+        token. If you have never done this: open Telegram, talk to
+        <a href="https://t.me/BotFather">@BotFather</a>, send
+        <code>/newbot</code>, and follow the prompts. BotFather hands you a
+        token that looks like <code>123456:ABC-DEF…</code>. Treat it like a
+        password, because it is one.
+      </p>
+
+      <div class="warn">
+        <span class="tag">Never hardcode the token</span>
+        <p>Put it in an environment variable. Every sample in this book reads
+        <code>os.Getenv("BOT_TOKEN")</code>. If a token ever lands in a git
+        history, assume it is burned and revoke it with <code>/revoke</code>
+        in BotFather.</p>
+      </div>
+
+      <h2>A minimal bot</h2>
+      <p>Create a folder and a module:</p>
+
+      <pre><code>mkdir mybot && cd mybot
+go mod init mybot
+go get github.com/sidwiskers/hermes@latest</code></pre>
+
+      <p>Then <code>main.go</code>:</p>
+
+      <pre><span class="file-tab">main.go</span><code>package main
+
+import (
+    "context"
+    "log"
+    "os"
+    "os/signal"
+
+    "github.com/sidwiskers/hermes"
+)
+
+func main() {
+    ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+    defer stop()
+
+    bot := hermes.New(os.Getenv("BOT_TOKEN"))
+    bot.Use(hermes.Recover())
+
+    bot.Command("start", func(c *hermes.Context) error {
+        return c.Send("It works.")
+    })
+
+    if err := bot.Run(ctx); err != nil {
+        log.Fatal(err)
+    }
+}</code></pre>
+
+      <p>Run it:</p>
+
+      <pre><code>BOT_TOKEN=123456:ABC-DEF… go run .</code></pre>
+
+      <p>
+        Open your bot in Telegram and send <code>/start</code>. You should get
+        <em>It works.</em> back. If you get nothing, nine times out of ten the
+        token is wrong or the process never actually started polling. Check
+        stderr before anything else.
+      </p>
+
+      <h2>What just happened</h2>
+      <p>A few things worth noticing about those twenty lines:</p>
+      <ul>
+        <li><code>hermes.New</code> performs <strong>no network I/O</strong>.
+        The token is validated on the first API call, not at construction.
+        That means startup is instant and tests can build bots freely.</li>
+        <li><code>bot.Run(ctx)</code> starts long polling with production
+        defaults: batches of up to 100 updates, a 50-second long-poll
+        timeout, and exponential backoff from 250&nbsp;ms to 8&nbsp;s when the
+        network misbehaves.</li>
+        <li>When you press Ctrl-C, the signal cancels the context, Hermes
+        stops taking new updates, and <strong>drains the handlers already in
+        flight</strong> before returning. No half-processed messages.</li>
+        <li>On the first run Hermes calls <code>getMe</code> to learn the
+        bot's username (it needs it to parse <code>/cmd@YourBot</code>
+        mentions in groups). If you already know the username, skip that
+        request with <code>hermes.WithBotUsername("mybot")</code>.</li>
+      </ul>
+
+      <h2>Handler errors are your problem — in a good way</h2>
+      <p>
+        Handlers return <code>error</code>. Whatever you return is delivered
+        to the bot's error handler, which by default logs and moves on. Set
+        your own to see everything:
+      </p>
+
+      <pre><code>bot := hermes.New(os.Getenv("BOT_TOKEN"),
+    hermes.WithErrorHandler(func(c *hermes.Context, err error) {
+        log.Printf("handler failed: %v", err)
+    }),
+)</code></pre>
+
+      <p>
+        You can swap it at runtime with <code>bot.SetErrorHandler</code>. The
+        swap is atomic and safe to do while updates are flowing. And because
+        you registered <code>hermes.Recover()</code>, a panic inside a handler
+        becomes a <code>*hermes.PanicError</code> with a full stack trace
+        instead of a dead process.
+      </p>
+
+      <h2>Construction options you will actually use</h2>
+      <table>
+        <tr><th>Option</th><th>What it does</th></tr>
+        <tr><td><code>WithBotUsername("name")</code></td><td>Skips the startup <code>getMe</code> call.</td></tr>
+        <tr><td><code>WithMaxConcurrentUpdates(n)</code></td><td>Bounds how many handlers run at once. Default is <code>GOMAXPROCS × 8</code>, minimum 8.</td></tr>
+        <tr><td><code>WithErrorHandler(fn)</code></td><td>Sends asynchronous handler errors somewhere useful.</td></tr>
+        <tr><td><code>WithRawUpdates(true)</code></td><td>Keeps the original JSON of every update in <code>Update.Raw</code>. Costs one allocation per update; off by default.</td></tr>
+        <tr><td><code>WithHTTPClient(c)</code></td><td>Bring your own <code>*http.Client</code>: timeouts, proxies, tracing transports.</td></tr>
+        <tr><td><code>WithTestEnvironment(true)</code></td><td>Talks to Telegram's separate test datacenter instead of production.</td></tr>
+      </table>
+
+      <p>
+        There are more, but those six cover almost every real deployment. The
+        full list lives in <code>bot.go</code> in the repo, and it is short
+        enough to read in one sitting.
+      </p>
+
+      <h2>A slightly less trivial bot</h2>
+      <p>
+        Commands take arguments, and Hermes hands them to you two ways: a
+        raw string and a pre-split slice:
+      </p>
+
+      <pre><code>bot.Command("echo", func(c *hermes.Context) error {
+    if c.Args() == "" {
+        return c.Reply("Say something after /echo.")
+    }
+    return c.Send(c.Args())
+})
+
+bot.Command("shrug", func(c *hermes.Context) error {
+    return c.Send("¯\\_(ツ)_/¯")
+})</code></pre>
+
+      <p>
+        <code>c.Reply</code> quotes the incoming message;
+        <code>c.Send</code> posts fresh into the chat. That is the whole
+        difference, and choosing the right one is most of what makes a bot
+        feel polished.
+      </p>
+
+      <div class="note">
+        <span class="tag">Where to next</span>
+        <p>Polling is fine for development and for most small bots. The next
+        chapter covers when you should move to webhooks — and when you
+        absolutely should not bother.</p>
+      </div>
+
+      <nav class="pager"></nav>
+
+      <div class="colophon">The Hermes Cookbook · Chapter 1 of 13 · MIT</div>
+    </article>
+  </main>
+</div>
+
+<script src="../assets/js/book.js"></script>
+</body>
+</html>

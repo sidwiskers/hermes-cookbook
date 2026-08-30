@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>4. Keyboards and buttons — The Hermes Cookbook</title>
+<link rel="icon" href="../assets/img/logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/book.css">
+</head>
+<body>
+
+<header class="topbar">
+  <button id="menuToggle" class="gh" type="button">Chapters</button>
+  <a class="wordmark" href="../index.html"><img class="wordmark-logo" src="../assets/img/logo.svg" alt="">The <em>Hermes</em> Cookbook</a>
+  <span class="crumb">Chapter 4 · Keyboards and buttons</span>
+  <input id="q" type="search" placeholder="Filter chapters…" aria-label="Filter chapters">
+  <button id="theme" type="button">Dark</button>
+  <a class="gh" href="https://github.com/sidwiskers/hermes">Hermes on GitHub</a>
+</header>
+
+<div class="shell">
+  <nav class="toc"><p class="toc-head">Contents</p><ol></ol></nav>
+  <main>
+    <article>
+      <p class="kicker">Chapter 4</p>
+      <h1>Keyboards and buttons</h1>
+      <p class="lede">
+        Telegram has two keyboards: the inline one attached to a message, and
+        the reply one that replaces the user's keyboard. They are not
+        interchangeable, and picking the wrong one is a design bug users feel
+        immediately.
+      </p>
+
+      <h2>Inline keyboards with the helpers</h2>
+      <p>
+        Hermes ships tiny builders that read left-to-right the way the
+        keyboard renders:
+      </p>
+
+      <pre><code>bot.Command("menu", func(c *hermes.Context) error {
+    return c.Send("Pick one:", hermes.WithKeyboard(hermes.Keyboard(
+        hermes.Row(
+            hermes.Button("👍 Yes", "vote:yes"),
+            hermes.Button("👎 No", "vote:no"),
+        ),
+        hermes.Row(
+            hermes.Button("Open docs", "nav:docs"),
+        ),
+    )))
+})</code></pre>
+
+      <p>
+        <code>Keyboard</code> takes rows, <code>Row</code> takes buttons,
+        <code>Button</code> takes a label and a callback-data string. Tap a
+        button and Telegram sends you a <code>callback_query</code> carrying
+        that string — which is why chapters 5 and 6 exist.
+      </p>
+
+      <div class="warn">
+        <span class="tag">The 64-byte rule</span>
+        <p>Callback data is capped at <strong>64 bytes of UTF-8</strong>,
+        enforced by Telegram and checked by Hermes (the constant is exported
+        as <code>hermes.MaxCallbackDataBytes</code>). A short prefix plus an
+        id fits easily. A JSON blob of your entire form state does not.
+        Store state server-side; put the <em>key</em> in the button.</p>
+      </div>
+
+      <h2>Building markups by hand</h2>
+      <p>
+        When the helpers are too rigid (dynamic rows, URL buttons, disabled
+        buttons), build the struct directly. It is an ordinary type:
+      </p>
+
+      <pre><code>markup := hermes.InlineKeyboardMarkup{
+    InlineKeyboard: [][]hermes.InlineKeyboardButton{
+        {
+            {Text: "Read the post", URL: "https://example.com/post/42"},
+        },
+        {
+            {Text: "Approve", CallbackData: "approve:42"},
+            {Text: "Reject", CallbackData: "reject:42",
+                Disabled: &amp;hermes.DisabledButton{}}, // greyed out, untappable
+        },
+    },
+}
+return c.Send("Moderation queue item #42", hermes.WithKeyboard(markup))</code></pre>
+
+      <p>
+        Disabled buttons and markup-level force-reply arrived in Bot API 10.3,
+        and Hermes exposes them the day they're in the schema, with no wrapper
+        lag. URL buttons never hit your bot at all; Telegram opens the link
+        client-side. <code>SwitchInlineQuery</code> drops the user into inline
+        mode in another chat (note it is a <code>*string</code> field, like
+        several on this struct, so a two-line <code>ptr</code> helper earns its
+        keep here). Both are free engagement. Use them.
+      </p>
+
+      <h2>Reply keyboards: the other kind</h2>
+      <p>
+        A reply keyboard replaces the user's own keyboard under the composer.
+        Tapping a button sends its label as an ordinary text message. There
+        is no callback, no data, just text you then match on:
+      </p>
+
+      <pre><code>markup := hermes.ReplyKeyboardMarkup{
+    Keyboard: [][]hermes.KeyboardButton{
+        {{Text: "📍 Send location", RequestLocation: true}},
+        {{Text: "☰ Menu"}, {Text: "✕ Cancel"}},
+    },
+    ResizeKeyboard:   true,
+    OneTimeKeyboard:   true,
+}
+return c.Send("Where are you?", hermes.WithMarkup(markup))</code></pre>
+
+      <p>
+        Three flags matter more than the rest:
+      </p>
+      <ul>
+        <li><code>ResizeKeyboard</code>: almost always set it. The default
+        keyboard is comically tall on phones.</li>
+        <li><code>OneTimeKeyboard</code> — collapses after one tap. Right for
+        one-shot questions, wrong for persistent menus.</li>
+        <li><code>Selective</code> — in groups, shows the keyboard only to
+        the user you're replying to. Without it, everyone in the group gets
+        their keyboard hijacked, and they will tell you about it.</li>
+      </ul>
+
+      <h2>Removing a keyboard</h2>
+      <p>
+        Users notice a stale reply keyboard and read it as a bug. Remove it
+        with the typed client when the flow ends:
+      </p>
+
+      <pre><code>_, err := c.Bot.SendMessage(c.Context, hermes.SendMessageParams{
+    ChatID:      chatID,
+    Text:        "All done.",
+    ReplyMarkup: hermes.ReplyKeyboardRemove{RemoveKeyboard: true},
+})</code></pre>
+
+      <h2>Editing keyboards after the fact</h2>
+      <p>
+        The single most useful inline-keyboard pattern: swap the buttons
+        after a tap so the choice can't be made twice.
+      </p>
+
+      <pre><code>bot.CallbackPrefix("vote:", func(c *hermes.Context) error {
+    choice := strings.TrimPrefix(c.Data(), "vote:")
+    if err := recordVote(c, choice); err != nil {
+        return err
+    }
+    // Replace the keyboard with nothing. The vote is final.
+    if err := c.EditKeyboard(nil); err != nil {
+        return err
+    }
+    return c.Answer("Vote recorded.")
+})</code></pre>
+
+      <p>
+        Notice the order: record first, edit second, answer last. If
+        <code>recordVote</code> fails, the buttons stay in place and the user
+        can try again. Reorder those three lines and you have a vote that
+        disappears without being counted.
+      </p>
+
+      <nav class="pager"></nav>
+      <div class="colophon">The Hermes Cookbook · Chapter 4 of 13 · MIT</div>
+    </article>
+  </main>
+</div>
+
+<script src="../assets/js/book.js"></script>
+</body>
+</html>

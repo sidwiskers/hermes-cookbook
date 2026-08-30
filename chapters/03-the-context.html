@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3. The context — The Hermes Cookbook</title>
+<link rel="icon" href="../assets/img/logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/book.css">
+</head>
+<body>
+
+<header class="topbar">
+  <button id="menuToggle" class="gh" type="button">Chapters</button>
+  <a class="wordmark" href="../index.html"><img class="wordmark-logo" src="../assets/img/logo.svg" alt="">The <em>Hermes</em> Cookbook</a>
+  <span class="crumb">Chapter 3 · The context</span>
+  <input id="q" type="search" placeholder="Filter chapters…" aria-label="Filter chapters">
+  <button id="theme" type="button">Dark</button>
+  <a class="gh" href="https://github.com/sidwiskers/hermes">Hermes on GitHub</a>
+</header>
+
+<div class="shell">
+  <nav class="toc"><p class="toc-head">Contents</p><ol></ol></nav>
+  <main>
+    <article>
+      <p class="kicker">Chapter 3</p>
+      <h1>The context</h1>
+      <p class="lede">
+        Every handler receives one argument: <code>*hermes.Context</code>.
+        It is the update, the chat, the sender, the API client, and the
+        cancellation signal, rolled into one object. Learning it well is
+        most of learning Hermes.
+      </p>
+
+      <h2>Reading the update</h2>
+      <p>
+        The context answers the questions you ask first in every handler:
+      </p>
+
+      <pre><code>bot.On(hermes.TextMessage, func(c *hermes.Context) error {
+    text := c.Text()       // message text or caption
+    user := c.Sender()     // *User; nil if the update has no sender
+    id, ok := c.ChatID()   // the safe way to get a chat id
+    _ = text
+    _ = user
+    _ = id
+    _ = ok
+    return nil
+})</code></pre>
+
+      <p>
+        The naming is deliberate: methods that can fail to produce a value
+        return <code>(value, bool)</code> instead of nil-pointer landmines.
+        <code>c.ChatID()</code> is the one you will call most. Almost every
+        API method needs a chat id, and this is the safe way to get it.
+      </p>
+
+      <p>
+        Command handlers get two helpers that save you the
+        <code>strings.Fields</code> dance:
+      </p>
+
+      <pre><code>bot.Command("remind", func(c *hermes.Context) error {
+    args := c.Argv() // ["10m", "stretch"] for /remind 10m stretch
+    if len(args) < 2 {
+        return c.Reply("Usage: /remind &lt;when&gt; &lt;what&gt;")
+    }
+    return schedule(args[0], strings.Join(args[1:], " "))
+})</code></pre>
+
+      <h2>Sending: the method families</h2>
+      <p>
+        Context send methods come in pairs, and the pairing is consistent
+        across the whole surface:
+      </p>
+      <ul>
+        <li><code>c.Send(text)</code> → <code>c.SendMessage(text)</code></li>
+        <li><code>c.Reply(text)</code> → <code>c.ReplyMessage(text)</code></li>
+        <li><code>c.Photo(f, cap)</code> → <code>c.PhotoMessage(f, cap)</code></li>
+        <li><code>c.Ephemeral(t)</code> → <code>c.EphemeralMessage(t)</code></li>
+      </ul>
+      <p>
+        The short form returns only <code>error</code>. The
+        <code>Message</code>-suffixed form returns the sent
+        <code>(*Message, error)</code> — which you need the moment you want to
+        edit, pin, or delete that message later. My habit: use the short form
+        until the day you need the message id, then switch. Don't carry the
+        extra return value "just in case".
+      </p>
+
+      <pre><code>msg, err := c.SendMessage("Working on it.")
+if err != nil {
+    return err
+}
+
+// do the slow thing, then edit the message we just sent
+_, err = c.Bot.EditMessageText(c.Context, hermes.EditMessageTextParams{
+    ChatID:    msg.Chat.ID,
+    MessageID: msg.MessageID,
+    Text:      "Done.",
+})
+return err</code></pre>
+
+      <div class="note">
+        <span class="tag">What c.Edit edits</span>
+        <p><code>c.Edit(...)</code> edits the message represented by the
+        current update. If you sent a new message and want to edit that one
+        later, keep its returned <code>*Message</code> and use its chat and
+        message ids as above.</p>
+      </div>
+
+      <h2>Send options, one at a time</h2>
+      <p>
+        Every send method takes variadic <code>hermes.SendOption</code>.
+        The common ones:
+      </p>
+
+      <pre><code>c.Send("&lt;b&gt;bold&lt;/b&gt; and &lt;i&gt;italic&lt;/i&gt;", hermes.HTML)
+c.Send("_italic_", hermes.Markdown)
+c.Send("silent update", hermes.Silent)
+c.Send("no forwarding this", hermes.Protected)
+c.Send("check https://example.com", hermes.NoPreview)
+c.Send("spoiler", hermes.Spoiler)</code></pre>
+
+      <div class="warn">
+        <span class="tag">HTML is the only parse mode I trust</span>
+        <p>MarkdownV2 requires escaping sixteen different characters and will
+        reject your message at 3&nbsp;a.m. because a user pasted a
+        <code>.</code>. HTML needs three escapes (<code>&amp;</code>,
+        <code>&lt;</code>, <code>&gt;</code>) and fails loudly at the call
+        site. Pick HTML, write a tiny <code>escape()</code> helper, move on
+        with your life.</p>
+      </div>
+
+      <h2>Callbacks are answers waiting to happen</h2>
+      <p>
+        When a user taps an inline button, Telegram shows a spinning
+        indicator until your bot calls <code>answerCallbackQuery</code>.
+        The context makes it one call:
+      </p>
+
+      <pre><code>bot.CallbackPrefix("vote:", func(c *hermes.Context) error {
+    // c.Data() is the callback data string
+    return c.Answer("Counted.")     // transient toast
+})
+
+bot.Callback("destructive:confirm", func(c *hermes.Context) error {
+    return c.Alert("This cannot be undone.") // modal dialog
+})</code></pre>
+
+      <p>
+        If your handler does its work and has nothing to say, call
+        <code>c.Acknowledge()</code> — an empty answer that just stops the
+        spinner. Leaving the spinner running is the most common
+        "the bot feels broken" bug in Telegram land, and it is always this.
+      </p>
+
+      <h2>Chat actions, reactions, pins</h2>
+      <pre><code>c.ChatAction("typing") // show the "typing…" bubble
+c.React(hermes.ReactionType{ /* 👍 */ })
+c.Pin()   // pin the incoming message
+c.Unpin() // unpin it
+c.Delete()</code></pre>
+
+      <p>
+        None of these are exotic. But having them on the context, named
+        after what they do, is what keeps handlers readable six months later.
+      </p>
+
+      <h2>Cancellation and deadlines</h2>
+      <p>
+        The context carries a real <code>context.Context</code>. Middleware
+        such as <code>hermes.Timeout</code> can derive a deadline from it, and
+        custom integrations may supply cancellation of their own. Pass it to
+        everything that can block:
+      </p>
+
+      <pre><code>bot.Command("lookup", func(c *hermes.Context) error {
+    row, err := db.QueryContext(c.Context,
+        "SELECT note FROM notes WHERE id = $1", c.Args())
+    if err != nil {
+        return err // includes deadline/cancellation errors when this context ends
+    }
+    _ = row
+    return c.Send("found it")
+})</code></pre>
+
+      <p>
+        One subtle but important detail: normal Hermes polling and queued
+        webhooks stop accepting new updates on shutdown, then drain handlers
+        that were already accepted. They do not cancel those handlers just
+        because shutdown began. If a blocking operation needs a hard bound,
+        install <code>Timeout</code> or give that operation its own deadline.
+      </p>
+
+      <div class="note">
+        <span class="tag">Escape hatches</span>
+        <p>The context covers the common cases. When you need something it
+        doesn't wrap, the typed API client is right there:
+        <code>c.Bot</code> is the embedded client behind every call, and the
+        root facade re-exports all 185 method param types. You never have to
+        leave your handler to make an unusual call.</p>
+      </div>
+
+      <nav class="pager"></nav>
+      <div class="colophon">The Hermes Cookbook · Chapter 3 of 13 · MIT</div>
+    </article>
+  </main>
+</div>
+
+<script src="../assets/js/book.js"></script>
+</body>
+</html>

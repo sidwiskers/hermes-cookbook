@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>9. Files and media — The Hermes Cookbook</title>
+<link rel="icon" href="../assets/img/logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/book.css">
+</head>
+<body>
+
+<header class="topbar">
+  <button id="menuToggle" class="gh" type="button">Chapters</button>
+  <a class="wordmark" href="../index.html"><img class="wordmark-logo" src="../assets/img/logo.svg" alt="">The <em>Hermes</em> Cookbook</a>
+  <span class="crumb">Chapter 9 · Files and media</span>
+  <input id="q" type="search" placeholder="Filter chapters…" aria-label="Filter chapters">
+  <button id="theme" type="button">Dark</button>
+  <a class="gh" href="https://github.com/sidwiskers/hermes">Hermes on GitHub</a>
+</header>
+
+<div class="shell">
+  <nav class="toc"><p class="toc-head">Contents</p><ol></ol></nav>
+  <main>
+    <article>
+      <p class="kicker">Chapter 9</p>
+      <h1>Files and media</h1>
+      <p class="lede">
+        Sending a photo is one method call. Sending a hundred-megabyte video
+        without loading it into memory, showing a typing-style progress hint,
+        and surviving a flaky network takes a little more.
+      </p>
+
+      <h2>Sending media</h2>
+      <p>
+        The context exposes one method per media kind, each in the familiar
+        short / <code>Message</code>-suffixed pair:
+      </p>
+
+      <pre><code>c.Photo(file, "a cat", hermes.Spoiler)
+c.Document(file, "quarterly report", hermes.Protected)
+c.Video(file, "launch trailer", hermes.CaptionAbove, hermes.Streaming)
+c.Voice(file, "", hermes.Silent)
+c.Sticker(file)
+c.Animation(file, "loop")</code></pre>
+
+      <p>
+        The <code>file</code> argument is Hermes's <code>Upload</code> type —
+        it accepts a Telegram file id (for re-sending something Telegram
+        already hosts), a public URL, or local content to upload. The third
+        case is the one that matters for performance: uploads are
+        <strong>streamed</strong>, not buffered. A 500&nbsp;MB video costs the
+        process a few small buffers, not 500&nbsp;MB of heap. If you have ever
+        watched a bot get OOM-killed because it read a whole file into a
+        <code>[]byte</code> "temporarily", you know why this is in the design
+        principles and not the changelog footnotes.
+      </p>
+
+      <h2>Media-group albums</h2>
+      <p>
+        Albums go through the typed client with
+        <code>MediaGroupItem</code> entries:
+      </p>
+
+      <pre><code>items := []hermes.MediaGroupItem{
+    photoItem(upload1, "first"),
+    photoItem(upload2, "second"),
+    videoItem(upload3, "third"),
+}
+msgs, err := c.Bot.SendMediaGroup(c.Context, hermes.SendMediaGroupParams{
+    ChatID: chatID,
+    Media:  items,
+})</code></pre>
+
+      <p>
+        Two album rules Telegram enforces and your code should respect:
+        2–10 items, and captions on individual items only (there is no
+        album-level caption). Order is preserved. If you need the album to
+        land as one notification, send it with <code>Silent</code> off and
+        resist the urge to also send a separate "here are the photos!"
+        message. The album <em>is</em> the message.
+      </p>
+
+      <h2>Keep users informed with chat actions</h2>
+      <p>
+        Uploads are slow by nature. Telegram shows "sending photo…",
+        "uploading document…" and friends when you ask:
+      </p>
+
+      <pre><code>if err := c.ChatAction("upload_document"); err != nil {
+    return err
+}
+return c.Document(bigFile, "the report")</code></pre>
+
+      <p>
+        Chat actions expire after about five seconds or when a message
+        arrives, whichever comes first. For genuinely long uploads, re-send
+        the action every few seconds from a ticker that stops when the upload
+        returns. Users forgive a slow bot that looks busy; they abandon a
+        slow bot that looks dead.
+      </p>
+
+      <h2>Receiving files</h2>
+      <p>
+        Incoming media arrives with a <code>file_id</code> on the message.
+        The flow is always the same: <code>getFile</code> to learn the path,
+        then download from Telegram's file endpoint:
+      </p>
+
+      <pre><code>bot.On(hermes.DocumentMessage, func(c *hermes.Context) error {
+    doc := c.Message.Document
+    f, err := c.Bot.GetFile(c.Context, hermes.GetFileParams{FileID: doc.FileID})
+    if err != nil {
+        return err
+    }
+    // f.FilePath is the path to fetch from the file endpoint.
+    return ingest(c.Context, f.FilePath)
+})</code></pre>
+
+      <p>
+        Filter first (<code>hermes.DocumentMessage</code>,
+        <code>hermes.PhotoMessage</code>, …) and the handler can assume the
+        media is there. That's what the filters are for. Photos arrive as
+        an array of sizes; the last element is the largest. Bots that need
+        originals should ask users to send the image <em>as a document</em>.
+        Telegram recompresses photos, and no bot API setting changes that.
+      </p>
+
+      <h2>Editing media</h2>
+      <p>
+        Text edits (<code>c.Edit</code>) and caption edits
+        (<code>c.EditCaption</code>) cover most needs. Swapping the media
+        itself goes through <code>EditMessageMedia</code> with an
+        <code>InputMedia</code> value — and yes, uploaded replacement media
+        streams too, including for ephemeral messages (chapter 10), which
+        arrived with Bot API 10.3.
+      </p>
+
+      <div class="note">
+        <span class="tag">A word on file ids</span>
+        <p>File ids are stable per bot and free to re-send — uploading the
+        same asset twice is wasted bandwidth. Cache the id Telegram returns
+        in the sent <code>Message</code> the first time, and re-use it
+        forever after. This one habit turns a media-heavy bot from
+        bandwidth-bound to instant.</p>
+      </div>
+
+      <nav class="pager"></nav>
+      <div class="colophon">The Hermes Cookbook · Chapter 9 of 13 · MIT</div>
+    </article>
+  </main>
+</div>
+
+<script src="../assets/js/book.js"></script>
+</body>
+</html>

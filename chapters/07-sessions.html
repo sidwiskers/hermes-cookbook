@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>7. Sessions — The Hermes Cookbook</title>
+<link rel="icon" href="../assets/img/logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/book.css">
+</head>
+<body>
+
+<header class="topbar">
+  <button id="menuToggle" class="gh" type="button">Chapters</button>
+  <a class="wordmark" href="../index.html"><img class="wordmark-logo" src="../assets/img/logo.svg" alt="">The <em>Hermes</em> Cookbook</a>
+  <span class="crumb">Chapter 7 · Sessions</span>
+  <input id="q" type="search" placeholder="Filter chapters…" aria-label="Filter chapters">
+  <button id="theme" type="button">Dark</button>
+  <a class="gh" href="https://github.com/sidwiskers/hermes">Hermes on GitHub</a>
+</header>
+
+<div class="shell">
+  <nav class="toc"><p class="toc-head">Contents</p><ol></ol></nav>
+  <main>
+    <article>
+      <p class="kicker">Chapter 7</p>
+      <h1>Sessions</h1>
+      <p class="lede">
+        Bots are stateless between updates unless you make them otherwise.
+        Hermes sessions are typed, keyed per user or chat, and installed as
+        ordinary middleware. Nothing global, nothing hidden.
+      </p>
+
+      <h2>The shape of it</h2>
+      <p>
+        A session has three parts: a <strong>store</strong> (where values
+        live), a <strong>key function</strong> (which updates share a value),
+        and the <strong>manager</strong> that ties them together as
+        middleware:
+      </p>
+
+      <pre><code>type prefs struct {
+    Language string
+    Timezone string
+}
+
+store := session.NewMemory[prefs](24 * time.Hour)
+sessions := session.New(store, session.ByChatUser,
+    session.WithNamespace("prefs"),
+)
+
+bot.Use(sessions.Middleware())</code></pre>
+
+      <p>
+        <code>NewMemory[T](ttl)</code> is a sharded, lazily-expiring
+        in-process store. Values disappear after the TTL. It is unbounded by
+        default, which is convenient for small trusted workloads. If the
+        number of session keys can be driven by untrusted traffic, set an
+        explicit capacity instead:
+      </p>
+
+      <pre><code>store := session.NewMemoryWithConfig[prefs](session.MemoryConfig{
+    TTL:        24 * time.Hour,
+    MaxEntries: 100_000,
+})</code></pre>
+
+      <p>
+        At the configured limit, new keys return
+        <code>session.ErrCapacity</code> instead of growing memory without
+        bound. Existing keys can still be updated normally.
+      </p>
+
+      <h2>Choosing the key</h2>
+      <table>
+        <tr><th>Key function</th><th>One session per…</th><th>Right for</th></tr>
+        <tr><td><code>session.ByUser</code></td><td>Telegram user, across all chats</td><td>Global preferences, rate-limit state, wallets</td></tr>
+        <tr><td><code>session.ByChat</code></td><td>Chat</td><td>Group settings, shared game state</td></tr>
+        <tr><td><code>session.ByChatUser</code></td><td>User <em>within</em> a chat</td><td>Multi-step forms, per-group profiles</td></tr>
+      </table>
+      <p>
+        The default mistake is <code>ByUser</code> for everything. If a user
+        starts a setup flow in your support group while another one is
+        halfway through in DMs, <code>ByUser</code> mashes them together.
+        When in doubt, <code>ByChatUser</code> is the honest default for
+        conversational flows. Updates that carry no user or chat simply skip
+        session attachment — the key function returns
+        <code>(Key{}, false)</code> and the handler runs sessionless.
+      </p>
+
+      <h2>Namespaces: two managers, one chat</h2>
+      <p>
+        Namespaces let independent session managers coexist without key
+        collisions — a preferences session and a game-state session can both
+        key on <code>ByChatUser</code> and never see each other's values:
+      </p>
+
+      <pre><code>prefs := session.New(prefsStore, session.ByChatUser,
+    session.WithNamespace("prefs"))
+game := session.New(gameStore, session.ByChatUser,
+    session.WithNamespace("game"))
+
+bot.Use(prefs.Middleware(), game.Middleware())</code></pre>
+
+      <h2>When memory is not enough</h2>
+      <p>
+        The built-in store dies with the process. For anything that must
+        survive a deploy, implement <code>session.Store[T]</code> (three
+        methods: <code>Load</code>/<code>Save</code>/<code>Delete</code>, all
+        context-aware) over Redis, Postgres, or whatever you already run.
+        The contract is small on purpose: stores must be safe for concurrent
+        use, and the manager handles serialization of updates within a key so
+        two rapid-fire messages from the same user don't interleave
+        read-modify-write cycles.
+      </p>
+
+      <div class="note">
+        <span class="tag">Serialization, precisely</span>
+        <p>The manager serializes updates <em>that share a session key</em>,
+        not the whole bot. Two users' updates still run concurrently; two
+        updates from the same user in the same chat queue up. That's the
+        ordering you want for forms and counters, without paying for a
+        global lock.</p>
+      </div>
+
+      <h2>Housekeeping</h2>
+      <p>
+        In-memory stores expire entries lazily (on access) and expose
+        <code>Sweep()</code> for the eager path. If you want expiry to be
+        prompt rather than eventual, run the cleanup loop next to the bot:
+      </p>
+
+      <pre><code>go func() {
+    if err := store.Cleanup(ctx, 5*time.Minute); err != nil {
+        log.Printf("session cleanup stopped: %v", err)
+    }
+}()</code></pre>
+
+      <p>
+        <code>Cleanup</code> blocks until the context ends and spawns no
+        hidden goroutines of its own. You see it, you own it, you shut it
+        down. Same philosophy as the rest of Hermes.
+      </p>
+
+      <p>
+        One last rule, learned the hard way: keep session values small and
+        boring. Ids, counters, a few strings. The moment a session holds a
+        megabyte of deserialized API responses, you've built a cache with
+        none of the tooling of a cache. Store the id, refetch the thing.
+      </p>
+
+      <nav class="pager"></nav>
+      <div class="colophon">The Hermes Cookbook · Chapter 7 of 13 · MIT</div>
+    </article>
+  </main>
+</div>
+
+<script src="../assets/js/book.js"></script>
+</body>
+</html>

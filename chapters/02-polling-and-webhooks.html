@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2. Polling and webhooks — The Hermes Cookbook</title>
+<link rel="icon" href="../assets/img/logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/book.css">
+</head>
+<body>
+
+<header class="topbar">
+  <button id="menuToggle" class="gh" type="button">Chapters</button>
+  <a class="wordmark" href="../index.html"><img class="wordmark-logo" src="../assets/img/logo.svg" alt="">The <em>Hermes</em> Cookbook</a>
+  <span class="crumb">Chapter 2 · Polling and webhooks</span>
+  <input id="q" type="search" placeholder="Filter chapters…" aria-label="Filter chapters">
+  <button id="theme" type="button">Dark</button>
+  <a class="gh" href="https://github.com/sidwiskers/hermes">Hermes on GitHub</a>
+</header>
+
+<div class="shell">
+  <nav class="toc"><p class="toc-head">Contents</p><ol></ol></nav>
+  <main>
+    <article>
+      <p class="kicker">Chapter 2</p>
+      <h1>Polling and webhooks</h1>
+      <p class="lede">
+        Telegram can hand you updates two ways: your bot asks for them
+        (polling), or Telegram POSTs them to you (webhooks). Hermes does both
+        properly, and the choice matters less than people think.
+      </p>
+
+      <h2>Polling: the default that keeps working</h2>
+      <p>
+        <code>bot.Run(ctx)</code> polls. You have already seen it. When you
+        want control, use <code>bot.Poll</code> with explicit options:
+      </p>
+
+      <pre><code>err := bot.Poll(ctx, hermes.PollOptions{
+    Limit:      50,                 // clamped to Telegram's max of 100
+    Timeout:    30,                 // seconds Telegram holds the long poll
+    MinBackoff: 500 * time.Millisecond,
+    MaxBackoff: 4 * time.Second,
+})</code></pre>
+
+      <p>
+        Zero values are deliberately sensible: limit 100, timeout 50 seconds,
+        backoff from 250&nbsp;ms to 8&nbsp;s. Polling works behind NAT, on a
+        laptop, on a free-tier VM with no domain name. It is also the only
+        choice when Telegram cannot reach you at all.
+      </p>
+
+      <h3>Cutting noise at the edge</h3>
+      <p>
+        If your bot only cares about messages and callbacks, tell Telegram not
+        to send you the rest:
+      </p>
+
+      <pre><code>err := bot.Poll(ctx, hermes.PollOptions{
+    AllowedUpdates: []string{"message", "callback_query"},
+})</code></pre>
+
+      <p>
+        This is the single most effective "optimisation" most bots can make:
+        the filtering happens on Telegram's side, before anything crosses the
+        network.
+      </p>
+
+      <h2>Webhooks: when push beats pull</h2>
+      <p>
+        With webhooks, Telegram POSTs each update to your HTTPS endpoint.
+        You need a public URL, and you need to tell Telegram where it is:
+      </p>
+
+      <pre><span class="file-tab">main.go</span><code>const path = "/telegram"
+
+if err := bot.SetWebhook(ctx, hermes.SetWebhookParams{
+    URL:         "https://bots.example.com" + path,
+    SecretToken: secret,
+}); err != nil {
+    log.Fatal(err)
+}
+
+err := bot.ServeWebhook(ctx, ":8080", path, hermes.WebhookOptions{
+    Secret: secret,
+})</code></pre>
+
+      <p>
+        Three things in that snippet are doing quiet, important work:
+      </p>
+      <ul>
+        <li>The <strong>secret token</strong> is compared against the
+        <code>X-Telegram-Bot-Api-Secret-Token</code> header on every request.
+        Requests without it are rejected. Set it — a webhook without a secret
+        is an open relay into your handlers.</li>
+        <li>Request bodies are bounded at 8&nbsp;MiB by default
+        (<code>MaxBodyBytes</code>), so a malformed or hostile POST cannot
+        exhaust memory before JSON decoding even starts.</li>
+        <li>Under overload — when every update slot in the dispatcher is busy
+        — the server answers <strong>503 with <code>Retry-After</code></strong>.
+        Telegram understands that response and redelivers. Your bot slows
+        down instead of falling over.</li>
+      </ul>
+
+      <div class="warn">
+        <span class="tag">TLS stops before Hermes</span>
+        <p><code>ServeWebhook</code> expects a reverse proxy (nginx, Caddy, a
+        load balancer) to terminate TLS. Telegram requires HTTPS on the public
+        URL; Hermes itself speaks plain HTTP on your private port. That
+        split is deliberate, not a missing feature.</p>
+      </div>
+
+      <h2>Replying in the webhook response</h2>
+      <p>
+        Telegram lets a webhook answer an update <em>in the HTTP response
+        body</em>, saving a whole API round trip. Hermes supports it with a
+        second server mode:
+      </p>
+
+      <pre><code>err := bot.ServeWebhookReplies(ctx, ":8080", path, hermes.WebhookOptions{
+    Secret: secret,
+})
+
+// inside a handler:
+bot.Command("ping", func(c *hermes.Context) error {
+    return c.RespondWebhook("sendMessage", map[string]any{
+        "chat_id": mustChatID(c),
+        "text":    "pong",
+    })
+})</code></pre>
+
+      <p>
+        The trade-off is real: the handler runs synchronously inside the HTTP
+        request, so a slow handler is now blocking Telegram's delivery. Use it
+        for bots whose handlers are uniformly fast: lookups, cached answers,
+        simple commands. Do not use it for bots that call external APIs in
+        the hot path. For everything else the ordinary queued mode
+        (<code>ServeWebhook</code>) is the right default.
+      </p>
+
+      <h2>Mounting inside an existing server</h2>
+      <p>
+        Already have an HTTP server? Skip <code>ServeWebhook</code> entirely
+        and take just the handler:
+      </p>
+
+      <pre><code>mux := http.NewServeMux()
+mux.Handle("/telegram", bot.WebhookHandler(hermes.WebhookOptions{
+    Secret: secret,
+}))
+log.Fatal(http.ListenAndServe(":8080", mux))</code></pre>
+
+      <p>
+        Same authentication, same body limits, same 503-under-load behaviour:
+        your server, your middleware, your lifecycle.
+      </p>
+
+      <h2>So which one?</h2>
+      <table>
+        <tr><th>Situation</th><th>Use</th></tr>
+        <tr><td>Development, laptops, no public URL</td><td>Polling</td></tr>
+        <tr><td>Small-to-medium bot, one VM</td><td>Polling (seriously)</td></tr>
+        <tr><td>High volume, latency-sensitive</td><td>Webhook</td></tr>
+        <tr><td>Serverless / scale-to-zero</td><td>Webhook (it's the only option)</td></tr>
+        <tr><td>Handlers are all fast and pure</td><td>Webhook replies</td></tr>
+        <tr><td>Behind a corporate NAT you don't control</td><td>Polling</td></tr>
+      </table>
+
+      <p>
+        My rule of thumb: start on polling, and only move to webhooks when you
+        can name the concrete reason: volume, latency, or a platform that
+        requires them. "Webhooks feel more professional" is not a reason;
+        they add a public endpoint, a secret, and a TLS stack to your
+        operational life.
+      </p>
+
+      <nav class="pager"></nav>
+      <div class="colophon">The Hermes Cookbook · Chapter 2 of 13 · MIT</div>
+    </article>
+  </main>
+</div>
+
+<script src="../assets/js/book.js"></script>
+</body>
+</html>

@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>8. State machines — The Hermes Cookbook</title>
+<link rel="icon" href="../assets/img/logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/book.css">
+</head>
+<body>
+
+<header class="topbar">
+  <button id="menuToggle" class="gh" type="button">Chapters</button>
+  <a class="wordmark" href="../index.html"><img class="wordmark-logo" src="../assets/img/logo.svg" alt="">The <em>Hermes</em> Cookbook</a>
+  <span class="crumb">Chapter 8 · State machines</span>
+  <input id="q" type="search" placeholder="Filter chapters…" aria-label="Filter chapters">
+  <button id="theme" type="button">Dark</button>
+  <a class="gh" href="https://github.com/sidwiskers/hermes">Hermes on GitHub</a>
+</header>
+
+<div class="shell">
+  <nav class="toc"><p class="toc-head">Contents</p><ol></ol></nav>
+  <main>
+    <article>
+      <p class="kicker">Chapter 8</p>
+      <h1>State machines</h1>
+      <p class="lede">
+        "What's your name? Great — what city? Almost done…" Multi-step
+        conversations are where naive bots go to die. The
+        <code>fsm</code> package keeps them as a table of transitions instead
+        of a thicket of ifs.
+      </p>
+
+      <h2>States, events, transitions</h2>
+      <p>
+        An FSM in Hermes is generic over two types you define: the
+        <strong>state</strong> (a small comparable type — an int enum is
+        idiomatic) and the <strong>data</strong> (whatever the conversation
+        has collected so far):
+      </p>
+
+      <pre><code>type step uint8
+
+const (
+    idle step = iota
+    awaitingName
+    awaitingCity
+)
+
+type signup struct {
+    Name string
+    City string
+}
+
+store := session.NewMemory[fsm.Snapshot[step, signup]](24 * time.Hour)
+sessions := session.New(store, session.ByChatUser, session.WithNamespace("signup"))
+flow := fsm.New(sessions, idle)</code></pre>
+
+      <p>
+        The session stores <code>fsm.Snapshot[S, D]</code> — the current
+        state plus the accumulated data, so a deploy-safe store (chapter 7)
+        makes conversations survive restarts with zero extra work.
+      </p>
+
+      <h2>Declaring transitions</h2>
+      <pre><code>err := flow.Add(fsm.Rule[step, signup]{
+    From:  idle,
+    Event: "begin",
+    To:    awaitingName,
+})</code></pre>
+
+      <p>
+        A rule says: <em>in state</em> <code>From</code>, <em>on event</em>
+        <code>Event</code>, <em>move to</em> <code>To</code> — optionally
+        guarded, optionally with an action that mutates the data. Rules
+        without a valid transition fail with
+        <code>fsm.TransitionError</code> wrapping
+        <code>fsm.ErrNoTransition</code>, which is how you detect "user did
+        something out of order" as a typed error instead of a string compare.
+      </p>
+
+      <h2>Wiring it to routes</h2>
+      <p>
+        The pattern that keeps handlers flat: the command fires an event, the
+        fallback handler reads the state. This is the full flow, adapted from
+        the repo's own stateful example:
+      </p>
+
+      <pre><span class="file-tab">main.go</span><code>bot.Use(hermes.Recover(), flow.Middleware())
+
+bot.Command("signup", flow.Then("begin", func(c *hermes.Context) error {
+    return c.Send("What should I call you?")
+}))
+
+bot.OnUpdate(func(c *hermes.Context) error {
+    current, err := flow.State(c)
+    if err != nil {
+        return err
+    }
+    if current != awaitingName {
+        return nil
+    }
+    name := strings.TrimSpace(c.Text())
+    if name == "" {
+        return c.Send("I need an actual name — try again.")
+    }
+    if err := flow.Set(c, fsm.Snapshot[step, signup]{
+        State: awaitingCity,
+        Data:  signup{Name: name},
+    }); err != nil {
+        return err
+    }
+    return c.Send("Nice to meet you, " + name + ". Which city?")
+})</code></pre>
+
+      <p>
+        <code>flow.Then("begin", handler)</code> is the useful compound: fire
+        the <code>begin</code> transition, then run the handler. If the
+        transition is illegal (say the user is already mid-flow), the
+        handler never runs and you get the transition error, which is exactly
+        the right place to answer "you're already signing up".
+      </p>
+
+      <h2>Routing by state</h2>
+      <p>
+        There is one ordering detail worth learning early: ordinary router
+        filters run before route middleware. The FSM session therefore is not
+        bound yet when a normal <code>bot.On(...)</code> filter is evaluated.
+        For state-driven fallback routing, read the state inside
+        <code>OnUpdate</code> and dispatch from there:
+      </p>
+
+      <pre><code>bot.OnUpdate(func(c *hermes.Context) error {
+    current, err := flow.State(c)
+    if err != nil {
+        return err
+    }
+
+    switch current {
+    case awaitingName:
+        if !hermes.TextMessage(c) {
+            return nil
+        }
+        return collectName(c)
+    case awaitingCity:
+        if !hermes.TextMessage(c) {
+            return nil
+        }
+        return collectCity(c)
+    default:
+        return nil
+    }
+})</code></pre>
+
+      <div class="note">
+        <span class="tag">About flow.In</span>
+        <p><code>flow.In(...)</code> is still useful when you call it from
+        code that is already running inside the machine middleware. Do not
+        use it directly as a normal router filter such as
+        <code>bot.On(flow.In(...), handler)</code>; at that point the session
+        has not been attached yet.</p>
+      </div>
+
+      <h2>Guards and actions</h2>
+      <pre><code>flow.Add(fsm.Rule[step, signup]{
+    From:  awaitingCity,
+    Event: "finish",
+    To:    idle,
+    Guard: func(c *hermes.Context, s fsm.Snapshot[step, signup]) bool {
+        return s.Data.Name != "" // never finish without a name
+    },
+    Action: func(c *hermes.Context, d *signup) error {
+        d.City = strings.TrimSpace(c.Text())
+        return nil
+    },
+})</code></pre>
+
+      <p>
+        The guard decides whether the transition is legal <em>right now</em>;
+        the action folds the latest input into the data. Keep actions small —
+        if an action needs three API calls, fire the event from a handler
+        that does the calls first and keeps the action as bookkeeping.
+      </p>
+
+      <h2>The escape hatch every flow needs</h2>
+      <p>
+        Users abandon conversations. Give them a way out, always:
+      </p>
+
+      <pre><code>bot.Command("cancel", func(c *hermes.Context) error {
+    if err := flow.Reset(c); err != nil {
+        return err
+    }
+    return c.Send("Cancelled. /signup to start over.")
+})</code></pre>
+
+      <p>
+        <code>Reset</code> drops the snapshot entirely. Pair it with a
+        session TTL (chapter 7) so abandoned flows also expire on their own.
+        The TTL is the janitor, <code>/cancel</code> is the door.
+      </p>
+
+      <nav class="pager"></nav>
+      <div class="colophon">The Hermes Cookbook · Chapter 8 of 13 · MIT</div>
+    </article>
+  </main>
+</div>
+
+<script src="../assets/js/book.js"></script>
+</body>
+</html>

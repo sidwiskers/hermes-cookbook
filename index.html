@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Hermes Cookbook — Telegram bots in Go, done properly</title>
+<meta name="description" content="A practical, book-style guide to building Telegram bots with Hermes, the zero-dependency Bot API framework for Go.">
+<link rel="icon" href="assets/img/logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/css/book.css">
+</head>
+<body>
+
+<header class="topbar">
+  <button id="menuToggle" class="gh" type="button">Chapters</button>
+  <a class="wordmark" href="index.html"><img class="wordmark-logo" src="assets/img/logo.svg" alt="">The <em>Hermes</em> Cookbook</a>
+  <span class="crumb">Telegram bots in Go, done properly</span>
+  <input id="q" type="search" placeholder="Filter chapters…" aria-label="Filter chapters">
+  <button id="theme" type="button">Dark</button>
+  <a class="gh" href="https://github.com/sidwiskers/hermes">Hermes on GitHub</a>
+</header>
+
+<div class="shell">
+  <nav class="toc">
+    <p class="toc-head">Contents</p>
+    <ol></ol>
+    <div class="toc-foot">
+      MIT licensed — corrections and chapter
+      ideas welcome in the
+      <a href="https://github.com/sidwiskers/hermes-cookbook">repo</a>.<br>
+      Full API reference on
+      <a href="https://pkg.go.dev/github.com/sidwiskers/hermes">pkg.go.dev</a>.
+    </div>
+  </nav>
+
+  <main>
+    <article class="hero">
+      <img class="hero-logo" src="assets/img/logo.png" alt="Hermes — the winged profile sketch">
+      <p class="kicker">A field guide, not a reference</p>
+      <h1>The Hermes Cookbook</h1>
+      <p class="lede">
+        This is the book I wanted when I started shipping bots on Hermes: short
+        chapters, real code, and the mistakes called out before you make them.
+        It assumes you know Go and have talked to BotFather at least once.
+        Everything else, we build up.
+      </p>
+
+      <p>
+        Hermes is a Telegram bot framework for Go with a simple promise: the
+        core module depends on nothing outside the standard library, routing
+        is allocation-free, and every one of the 185 Bot&nbsp;API methods is
+        typed. You write ordinary Go; Hermes stays out of the way.
+      </p>
+
+      <pre><code>package main
+
+import (
+    "context"
+    "log"
+    "os"
+
+    "github.com/sidwiskers/hermes"
+)
+
+func main() {
+    bot := hermes.New(os.Getenv("BOT_TOKEN"))
+
+    bot.Use(hermes.Recover())
+
+    bot.Command("start", func(c *hermes.Context) error {
+        return c.Send("Hello.")
+    })
+
+    log.Fatal(bot.Run(context.Background()))
+}</code></pre>
+
+      <p>
+        That is a complete, production-shaped bot. The rest of the book is
+        about everything between this and a fleet of hardened, well-tested
+        bots: webhooks, keyboards, typed callbacks, sessions, state machines,
+        media, ephemeral messages, rate limiting, deduplication, testing, and
+        running many bots in one process.
+      </p>
+
+      <div class="note">
+        <span class="tag">How to read this book</span>
+        <p>Chapters 1–3 are the spine, so read them in order. After that, jump
+        around. Code samples track the current Hermes release, and every
+        claim about behaviour comes from the framework's own test suite and
+        release evidence, not from wishful thinking.</p>
+      </div>
+
+      <h2>The chapters</h2>
+      <div class="chapters"></div>
+
+      <div class="colophon">
+        Set in Palatino and system sans. No trackers, no fonts fetched, no
+        build step. The whole book is a folder of files — as it should be.
+      </div>
+    </article>
+  </main>
+</div>
+
+<script src="assets/js/book.js"></script>
+</body>
+</html>

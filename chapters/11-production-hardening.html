@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>11. Production hardening — The Hermes Cookbook</title>
+<link rel="icon" href="../assets/img/logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/book.css">
+</head>
+<body>
+
+<header class="topbar">
+  <button id="menuToggle" class="gh" type="button">Chapters</button>
+  <a class="wordmark" href="../index.html"><img class="wordmark-logo" src="../assets/img/logo.svg" alt="">The <em>Hermes</em> Cookbook</a>
+  <span class="crumb">Chapter 11 · Production hardening</span>
+  <input id="q" type="search" placeholder="Filter chapters…" aria-label="Filter chapters">
+  <button id="theme" type="button">Dark</button>
+  <a class="gh" href="https://github.com/sidwiskers/hermes">Hermes on GitHub</a>
+</header>
+
+<div class="shell">
+  <nav class="toc"><p class="toc-head">Contents</p><ol></ol></nav>
+  <main>
+    <article>
+      <p class="kicker">Chapter 11</p>
+      <h1>Production hardening</h1>
+      <p class="lede">
+        A bot that works on your laptop fails in production in four
+        predictable ways: floods, duplicates, silent errors, and blindness.
+        Hermes ships a package for each. This chapter is the pre-flight
+        checklist.
+      </p>
+
+      <h2>Rate limiting: the flood gate</h2>
+      <p>
+        Telegram rate-limits you, and abusive users will too. The
+        <code>ratelimit</code> package is a sharded, bounded token bucket
+        installed as middleware:
+      </p>
+
+      <pre><code>limiter, err := ratelimit.New(5, time.Minute, // 5 updates a minute…
+    ratelimit.WithBurst(2),                  // …with a small burst allowance
+    ratelimit.WithKey(ratelimit.ByUser),     // …counted per user
+    ratelimit.WithMaxKeys(100_000),          // …and a cap on tracked users
+    ratelimit.WithRejected(func(c *hermes.Context, d ratelimit.Decision) error {
+        return c.Ephemeral("Slow down a little.")
+    }),
+)
+if err != nil {
+    log.Fatal(err)
+}
+bot.Use(limiter.Middleware())</code></pre>
+
+      <p>
+        Rejected updates surface <code>ratelimit.LimitError</code> (wrapping
+        <code>ratelimit.ErrLimited</code>) unless you handle them yourself in
+        <code>WithRejected</code>, which you should: a silent drop
+        looks like a broken bot, while a one-line ephemeral notice looks like
+        a policy. Idle buckets expire (<code>WithIdleTTL</code>), and
+        <code>MaxKeys</code> means a flood from millions of distinct fake
+        users cannot grow the limiter without bound.
+      </p>
+
+      <h2>Deduplication: make side effects retry-safe</h2>
+      <p>
+        Duplicate delivery is possible, but the exact retry behaviour depends
+        on how updates enter your bot. A queued webhook returns success once
+        the update is admitted, before the asynchronous handler finishes;
+        polling advances its offset as accepted updates are dispatched.
+        Synchronous webhook replies can return an error so Telegram retries,
+        and an overloaded webhook deliberately answers 503 with
+        <code>Retry-After</code>. Network failures can also make delivery
+        ambiguous. If a handler charges a card or posts to a channel, make the
+        side effect safe to see twice. <code>dedupe</code> claims each update
+        atomically before your handler runs:
+      </p>
+
+      <pre><code>dedup := dedupe.New(myStore, // implements dedupe.Store
+    dedupe.WithTTL(24*time.Hour),
+    dedupe.WithDuplicate(func(c *hermes.Context) error {
+        return nil // already handled; consume silently
+    }),
+)
+bot.Use(dedup.Middleware())</code></pre>
+
+      <p>
+        The store interface is deliberately tiny so it can sit on Redis,
+        Postgres, or the bundled in-memory implementation for single-process
+        bots. Put the middleware <em>before</em> anything expensive. A
+        downstream error releases the claim, which is especially useful for
+        retryable synchronous webhook flows. The goal is not to pretend every
+        transport retries every handler error; it is to make duplicate
+        delivery harmless wherever it can occur.
+      </p>
+
+      <h2>Errors: three kinds, three responses</h2>
+      <p>
+        Hermes distinguishes API errors (Telegram said no),
+        transport errors (the network said nothing), and handler errors
+        (your code said ouch). The practical setup:
+      </p>
+
+      <pre><code>bot.SetErrorHandler(func(c *hermes.Context, err error) {
+    var panicErr *hermes.PanicError
+    var limitErr *ratelimit.LimitError
+    switch {
+    case errors.As(err, &amp;panicErr):
+        alerts.Send(fmt.Sprintf("PANIC in handler: %v\n%s",
+            panicErr.Value, panicErr.Stack))
+    case errors.As(err, &amp;limitErr):
+        // expected; metrics only
+    default:
+        log.Printf("handler error: %v", err)
+    }
+})</code></pre>
+
+      <p>
+        Panics carry their stack (<code>Recover()</code> saw to that), so the
+        alert you get at 3&nbsp;a.m. contains the line number, not a shrug.
+        Rate-limit rejections are policy, not failure. Count them, don't
+        page on them. Everything else is at least a log line.
+      </p>
+
+      <h2>Observability: know before users tell you</h2>
+      <p>
+        The <code>observe</code> package gives you handler lifecycle hooks
+        and a lock-free metrics aggregator with fixed cardinality — counters
+        you can safely scrape forever:
+      </p>
+
+      <pre><code>metrics := &observe.Metrics{} // the zero value is ready to use
+bot.Use(observe.Middleware(metrics))
+
+// anywhere, e.g. your /healthz handler:
+snap := metrics.Snapshot()
+log.Printf("updates=%d failed=%d avg=%s peak-in-flight=%d",
+    snap.UpdatesSucceeded, snap.UpdatesFailed,
+    snap.AverageUpdateDuration().Round(time.Millisecond),
+    snap.UpdatesPeakInFlight)</code></pre>
+
+      <p>
+        "Fixed cardinality" deserves emphasis: the metrics are aggregate
+        counters and durations, not per-user or per-chat labels. You cannot
+        accidentally create ten million time series by labeling with a chat
+        id. The API simply doesn't let you. For outbound API calls, the
+        matching <code>WithAPIObserver</code> option on the bot reports every
+        Bot API call's lifecycle, including retries and rate-limit waits —
+        and the same <code>Metrics</code> value implements that observer too,
+        so <code>hermes.WithAPIObserver(metrics)</code> covers the outbound
+        side with one line.
+      </p>
+
+      <h2>The checklist</h2>
+      <table>
+        <tr><th>Before production</th><th>Chapter</th></tr>
+        <tr><td><code>Recover()</code> + <code>Timeout()</code> installed</td><td>6</td></tr>
+        <tr><td>Error handler that pages on panics, logs the rest</td><td>this one</td></tr>
+        <tr><td>Rate limiter with a user-facing rejection message</td><td>this one</td></tr>
+        <tr><td>Dedupe in front of anything with side effects</td><td>this one</td></tr>
+        <tr><td>Graceful shutdown via signal context (drains handlers)</td><td>1</td></tr>
+        <tr><td>Webhook secret set, if webhooks are used</td><td>2</td></tr>
+        <tr><td>Metrics snapshot on a health endpoint</td><td>this one</td></tr>
+      </table>
+
+      <p>
+        None of this is glamorous, and all of it is the difference between a
+        bot that survives its first viral moment and one that becomes a
+        cautionary tweet.
+      </p>
+
+      <nav class="pager"></nav>
+      <div class="colophon">The Hermes Cookbook · Chapter 11 of 13 · MIT</div>
+    </article>
+  </main>
+</div>
+
+<script src="../assets/js/book.js"></script>
+</body>
+</html>

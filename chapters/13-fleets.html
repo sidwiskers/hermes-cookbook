@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>13. Running a fleet — The Hermes Cookbook</title>
+<link rel="icon" href="../assets/img/logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/book.css">
+</head>
+<body>
+
+<header class="topbar">
+  <button id="menuToggle" class="gh" type="button">Chapters</button>
+  <a class="wordmark" href="../index.html"><img class="wordmark-logo" src="../assets/img/logo.svg" alt="">The <em>Hermes</em> Cookbook</a>
+  <span class="crumb">Chapter 13 · Running a fleet</span>
+  <input id="q" type="search" placeholder="Filter chapters…" aria-label="Filter chapters">
+  <button id="theme" type="button">Dark</button>
+  <a class="gh" href="https://github.com/sidwiskers/hermes">Hermes on GitHub</a>
+</header>
+
+<div class="shell">
+  <nav class="toc"><p class="toc-head">Contents</p><ol></ol></nav>
+  <main>
+    <article>
+      <p class="kicker">Chapter 13</p>
+      <h1>Running a fleet</h1>
+      <p class="lede">
+        One process, many bots. The <code>fleet</code> package hosts several
+        independent Hermes bots under one lifecycle — shared plumbing,
+        isolated failures, graceful shutdown for all.
+      </p>
+
+      <h2>Why a fleet and not many processes</h2>
+      <p>
+        Side projects multiply: a personal assistant bot, a channel cross-
+        poster, the family's birthday bot. Running each as its own process
+        means N binaries, N supervisors, N health checks. A fleet means one
+        binary, one systemd unit, one graceful stop that drains every bot's
+        handlers together. Bots stay fully independent (separate tokens,
+        routers, middleware, sessions, rate limiters) but share the
+        lifecycle and, if you want, the HTTP client.
+      </p>
+
+      <h2>The smallest fleet</h2>
+      <pre><span class="file-tab">main.go</span><code>host := fleet.New(fleet.WithBotMaxConcurrentUpdates(32))
+
+alerts := host.NewBot(os.Getenv("ALERTS_BOT_TOKEN"))
+alerts.Command("start", func(c *hermes.Context) error {
+    return c.Send("Alerts bot is ready.")
+})
+
+support := host.NewBot(os.Getenv("SUPPORT_BOT_TOKEN"))
+support.Command("start", func(c *hermes.Context) error {
+    return c.Send("Support bot is ready.")
+})
+
+if err := host.Mount("alerts", alerts); err != nil {
+    log.Fatal(err)
+}
+if err := host.Mount("support", support); err != nil {
+    log.Fatal(err)
+}
+log.Fatal(host.Run(ctx))</code></pre>
+
+      <p>
+        Each <code>NewBot</code> is a full <code>*hermes.Bot</code>.
+        Everything from the previous twelve chapters applies unchanged.
+        <code>Mount</code> gives it a name (used in status and failure
+        reporting) and declares how it receives updates. Mounted with no
+        options, as above, a bot polls with defaults.
+      </p>
+
+      <h2>Mixed delivery: some poll, some serve webhooks</h2>
+      <p>
+        Mount options pick the delivery mode per bot. Webhook bots share
+        <strong>one</strong> HTTP server on exact paths:
+      </p>
+
+      <pre><code>host := fleet.New(
+    fleet.WithWebhookAddress(":8443"),
+)
+
+host.Mount("alerts", alerts,
+    fleet.WithPolling(hermes.PollOptions{Timeout: 30}))
+host.Mount("support", support,
+    fleet.WithWebhook("/hooks/support", hermes.WebhookOptions{Secret: s1}))
+host.Mount("admin", admin,
+    fleet.WithWebhookReplies("/hooks/admin", hermes.WebhookOptions{Secret: s2}))</code></pre>
+
+      <p>
+        Two bots on webhooks and one on polling share a process without
+        sharing anything else. Each webhook bot still wants its own secret.
+        The per-path routing is not a substitute for per-bot authentication.
+      </p>
+
+      <h2>Failure policy: isolate or fail fast</h2>
+      <p>
+        When one bot's token is wrong or its update source dies at startup,
+        what should happen to the others? You decide once, at construction:
+      </p>
+
+      <pre><code>host := fleet.New(
+    fleet.WithFailurePolicy(fleet.IsolateFailures), // default: the rest carry on
+    fleet.WithErrorHandler(func(f *fleet.Failure) {
+        alerts.Send(fmt.Sprintf("bot %s failed: %v", f.Bot, f.Err))
+    }),
+)</code></pre>
+
+      <p>
+        Isolation is the default and usually right for side-project fleets:
+        the birthday bot being down shouldn't silence the alerts bot. Choose
+        fail-fast when the bots are one logical service, shards of the same
+        product, where running half of them is worse than running none.
+      </p>
+
+      <h2>Status and shutdown</h2>
+      <pre><code>for _, s := range host.Status() {
+    log.Printf("bot=%s state=%s mode=%s", s.Name, s.State, s.Mode)
+}</code></pre>
+
+      <p>
+        <code>Status</code> is stable enough to drive a health endpoint.
+        Shutdown is the same story as a single bot: cancel the context and
+        the fleet stops intake on every bot, then drains in-flight handlers
+        before <code>Run</code> returns. One Ctrl-C, cleanly handled, for the
+        whole stable.
+      </p>
+
+      <h2>Fleet rules of thumb</h2>
+      <ul>
+        <li><strong>Name mounts after their function</strong> ("alerts",
+        "support"), not their token or environment. Failure reports will
+        read like prose.</li>
+        <li><strong>Give every fleet an error handler.</strong> Isolated
+        failures are silent without one. Isolation keeps the process up,
+        but you still want to know.</li>
+        <li><strong>Bound each bot with
+        <code>WithBotMaxConcurrentUpdates</code></strong> so one busy bot
+        can't starve the rest of the process.</li>
+        <li><strong>Test each bot with Hermes Lab</strong> (chapter 12)
+        before mounting it. Fleets make operations easier, not broken bots
+        healthier.</li>
+      </ul>
+
+      <div class="note">
+        <span class="tag">You've reached the end</span>
+        <p>Thirteen chapters, from <code>/start</code> to a hardened fleet.
+        The best next step is to build something small and ship it — then
+        come back and tell us what the book got wrong. Issues and fixes
+        welcome in the
+        <a href="https://github.com/sidwiskers/hermes-cookbook">repo</a>.</p>
+      </div>
+
+      <nav class="pager"></nav>
+      <div class="colophon">The Hermes Cookbook · Chapter 13 of 13 · MIT</div>
+    </article>
+  </main>
+</div>
+
+<script src="../assets/js/book.js"></script>
+</body>
+</html>

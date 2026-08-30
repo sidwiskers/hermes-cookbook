@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>6. Filters, groups, middleware — The Hermes Cookbook</title>
+<link rel="icon" href="../assets/img/logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/book.css">
+</head>
+<body>
+
+<header class="topbar">
+  <button id="menuToggle" class="gh" type="button">Chapters</button>
+  <a class="wordmark" href="../index.html"><img class="wordmark-logo" src="../assets/img/logo.svg" alt="">The <em>Hermes</em> Cookbook</a>
+  <span class="crumb">Chapter 6 · Filters, groups, middleware</span>
+  <input id="q" type="search" placeholder="Filter chapters…" aria-label="Filter chapters">
+  <button id="theme" type="button">Dark</button>
+  <a class="gh" href="https://github.com/sidwiskers/hermes">Hermes on GitHub</a>
+</header>
+
+<div class="shell">
+  <nav class="toc"><p class="toc-head">Contents</p><ol></ol></nav>
+  <main>
+    <article>
+      <p class="kicker">Chapter 6</p>
+      <h1>Filters, groups, middleware</h1>
+      <p class="lede">
+        Exact commands and exact callbacks only get you so far. The rest of
+        routing is three ideas: filters that match updates, groups that share
+        filters, and middleware that wraps handlers.
+      </p>
+
+      <h2>Dispatch order, precisely</h2>
+      <p>For every update, Hermes tries, in order:</p>
+      <ol>
+        <li>exact command match (<code>bot.Command</code>),</li>
+        <li>exact callback-data match (<code>bot.Callback</code>),</li>
+        <li>callback prefixes, <strong>longest first</strong> (<code>bot.CallbackPrefix</code>),</li>
+        <li>filtered routes in registration order (<code>bot.On</code>),</li>
+        <li>the fallback (<code>bot.OnUpdate</code>).</li>
+      </ol>
+      <p>
+        At most one handler runs. "Longest prefix wins" is the rule that
+        saves you: <code>"admin:user:"</code> beats <code>"admin:"</code>
+        no matter which you registered first.
+      </p>
+
+      <h2>Filters are functions</h2>
+      <p>
+        A filter is <code>func(*Context) bool</code> — no interface, no
+        registration, no magic. Hermes ships the obvious set:
+      </p>
+
+      <pre><code>bot.On(hermes.PhotoMessage, handlePhoto)
+bot.On(hermes.PrivateChat, handleDM)
+bot.On(hermes.FromUsers(adminID), handleAdmin)
+bot.On(hermes.InChats(supportChatID), handleSupport)
+bot.On(hermes.TextEquals("yes", "y", "YES"), handleYes)
+bot.On(hermes.TextPrefix("remember "), handleRemember)</code></pre>
+
+      <p>And three combinators build the rest:</p>
+
+      <pre><code>moderation := hermes.All(
+    hermes.GroupChat,
+    hermes.PhotoMessage,
+    hermes.Not(hermes.FromUsers(bannedIDs...)),
+)
+bot.On(moderation, moderateGroupPhoto)</code></pre>
+
+      <p>
+        <code>All</code> is AND, <code>Any</code> is OR, <code>Not</code> is
+        negation. Set-based filters like <code>FromUsers</code> pre-build a
+        map at registration, so the per-update check is constant time no
+        matter how long the list. Writing your own filter is one function.
+        There's nothing to subclass:
+      </p>
+
+      <pre><code>func weekdaysOnly(c *hermes.Context) bool {
+    day := time.Now().Weekday()
+    return day != time.Saturday && day != time.Sunday
+}</code></pre>
+
+      <h2>Groups share filters</h2>
+      <p>
+        An admin section is the textbook case:
+      </p>
+
+      <pre><code>admin := bot.Group(hermes.FromUsers(adminIDs...))
+
+admin.Command("ban", handleBan)
+admin.Command("stats", handleStats)
+admin.On(hermes.TextPrefix("/broadcast "), handleBroadcast)</code></pre>
+
+      <p>
+        Every route on the group carries the group's filters. The alternative
+        (repeating <code>FromUsers(adminIDs...)</code> on every route) is
+        how an id gets added in nine places and missed in the tenth.
+      </p>
+
+      <h2>Middleware, in declaration order</h2>
+      <pre><code>bot.Use(
+    hermes.Recover(),                  // outermost: panics become errors
+    hermes.Timeout(15 * time.Second),  // then: every handler gets a deadline
+    metrics,                           // then: your own
+)</code></pre>
+
+      <p>
+        Middleware declared first runs first; it is the outermost wrapper.
+        The two you should install on every bot, always:
+      </p>
+      <ul>
+        <li><code>Recover()</code> converts a handler panic into a
+        <code>*hermes.PanicError</code> with the stack trace attached. Without
+        it a panic in one handler is contained by the dispatcher but you
+        learn nothing; with it, your error handler sees everything.</li>
+        <li><code>Timeout(d)</code> derives a per-update deadline and passes a
+        cloned context down the chain. It is the difference between "a slow
+        handler" and "a slow handler that eventually gives up".</li>
+      </ul>
+
+      <h2>Writing middleware that doesn't lie</h2>
+      <p>
+        Middleware is <code>func(Handler) Handler</code>. A logging
+        middleware is five lines:
+      </p>
+
+      <pre><code>func logUpdates(next hermes.Handler) hermes.Handler {
+    return func(c *hermes.Context) error {
+        start := time.Now()
+        err := next(c)
+        log.Printf("update=%d type=%s took=%s err=%v",
+            c.Update.ID, c.Type(), time.Since(start).Round(time.Millisecond), err)
+        return err
+    }
+}</code></pre>
+
+      <p>Three rules keep middleware honest:</p>
+      <ul>
+        <li><strong>Always return <code>next(c)</code>'s error</strong>,
+        wrapped or verbatim. Swallowing it makes failures invisible to the
+        error handler and to anyone debugging.</li>
+        <li><strong>Decide explicitly to skip.</strong> If the middleware
+        sometimes doesn't call <code>next</code> (rate limiting, auth), make
+        that the loud path: return an error or answer the user; don't just
+        return nil.</li>
+        <li><strong>Mutate the context through the documented surface.</strong>
+        <code>Timeout</code> works by cloning the context and swapping its
+        <code>Context</code> field; if you need the same trick,
+        <code>c.Clone()</code> exists for exactly this.</li>
+      </ul>
+
+      <div class="note">
+        <span class="tag">The fallback is your safety net</span>
+        <p><code>bot.OnUpdate</code> catches everything no route claimed.
+        Two good uses: replying "sorry, I don't know that command" in
+        private chats, and counting unmatched updates in metrics — a rising
+        count usually means clients are sending stale buttons after a
+        deploy.</p>
+      </div>
+
+      <nav class="pager"></nav>
+      <div class="colophon">The Hermes Cookbook · Chapter 6 of 13 · MIT</div>
+    </article>
+  </main>
+</div>
+
+<script src="../assets/js/book.js"></script>
+</body>
+</html>
